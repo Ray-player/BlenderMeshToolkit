@@ -1,0 +1,121 @@
+sequenceDiagram
+    actor User
+    participant Panel as UI Panel
+    participant Op as ShareMesh Operator
+    participant MM as MeshMerger
+    participant Logger
+
+    User->>Panel: 选中多个 Mesh 对象 + 点击 "Share Mesh Data"
+    Panel->>Op: execute(context)
+
+    Op->>Op: 读取 force_compensation 属性
+    Op->>Op: 验证选择（≥2个MESH + active in selection）
+
+    Op->>MM: merge_selected(force)
+
+    MM->>MM: 识别 master = active_object
+    MM->>MM: 提取 master_verts[], master_tris
+
+    loop 遍历其余选中对象
+        MM->>MM: _validate_topology(master, slave)
+        alt 顶点数不匹配
+            MM->>Logger: warn("跳过 {name} — 顶点数不匹配")
+        else 顶点数匹配
+            MM->>MM: _kabsch_index_aligned(master_verts, slave_verts)
+            alt Kabsch 异常
+                MM->>Logger: error("Kabsch 失败")
+            else Kabsch 成功
+                MM->>MM: 评估 rot_mag, pos_mag
+                alt 未超阈值 OR force_compensation
+                    alt 需要补偿
+                        MM->>MM: _compensate_pivot(obj, R, t)
+                        Note over MM: obj.matrix_world *= M_comp
+                        MM->>Logger: info("补偿 {name} 旋转{angle}° 位移{mm}mm")
+                    end
+                    MM->>MM: obj.data = master_mesh
+                    MM->>MM: 记录旧 mesh 为候选孤儿
+                else 超阈值且非强制
+                    MM->>Logger: warn("跳过 {name} — 超阈值")
+                end
+            end
+        end
+    end
+
+    MM->>MM: 遍历候选孤儿 → 删除 users==0 的 mesh data
+    MM->>MM: normalize_mesh_name(master_mesh)
+    MM->>Logger: summary(MergeResult)
+
+    Op-->>Panel: {'FINISHED'}
+    Panel-->>User: 更新日志面板
+
+    %% ──── 分隔 ────
+
+    actor User2 as User
+    participant Panel2 as Export Panel
+    participant Op2 as ExportPipeline Operator
+    participant SS as SceneScanner
+    participant GB as GLBExporter
+    participant MB as ManifestBuilder
+    participant CC as CoordinateConverter
+    participant NS as NameSanitizer
+    participant FS as File System
+
+    User2->>Panel2: 配置参数 + 点击 "Export GLB + Manifest"
+    Panel2->>Op2: execute(context)
+
+    Op2->>Op2: 读取 AppConfig（engine/naming/draco/anchor/export_dir）
+    Op2->>Logger: info("开始导出管线...")
+
+    %% 阶段 1：场景扫描
+    Op2->>SS: scan()
+    SS->>SS: iter_export_mesh_objects() → 过滤 MESH 类型
+    SS->>SS: find_anchor() → 定位 Anchor 对象
+    SS->>SS: _group_by_mesh_data() → defaultdict(list)
+    SS->>SS: _build_mesh_assets() → 为每个唯一 mesh data 构建 MeshAsset
+
+    loop 每个唯一 mesh data
+        SS->>NS: generate_asset_name(mesh_data_name, mode, max_len)
+        NS-->>SS: (asset_name, short_id)
+        SS->>SS: 计算 basis_matrix（参考实例旋转+缩放，不含平移）
+    end
+
+    SS->>SS: _compute_bounding_box() → 整体包围盒
+    SS-->>Op2: ExportContext
+
+    %% 阶段 2：GLB 导出
+    Op2->>GB: export(context)
+    GB->>GB: _create_temp_collection()
+    loop 每个 MeshAsset
+        GB->>GB: mesh_copy = reference.data.copy()
+        GB->>GB: mesh_copy.transform(basis_matrix)
+        GB->>GB: temp_obj 放在原点、无旋转缩放
+    end
+    GB->>GB: 隐藏原始对象 → 选中临时对象
+    GB->>GB: _build_gltf_args() → Draco 参数（如启用）
+    GB->>FS: bpy.ops.export_scene.gltf(...) → GLB 文件
+    GB->>GB: _cleanup_temp() → 恢复原始对象可见性 + 删除临时资源
+    GB-->>Op2: True
+
+    %% 阶段 3：Manifest 构建
+    Op2->>MB: build(context)
+
+    loop 每个场景对象
+        MB->>MB: 计算 anchor_relative_matrix
+        MB->>MB: 计算 reconstruct_relative_matrix
+        MB->>CC: convert_location/rotation/scale(Blender→UE5)
+        CC-->>MB: UE5 坐标系下的变换
+    end
+
+    MB->>MB: _build_objects_list() → 实例条目列表
+    MB->>MB: _build_assets_list() → 网格资产条目列表
+    MB->>MB: _build_statistics() → 统计摘要
+
+    MB-->>Op2: manifest dict
+
+    Op2->>MB: write(manifest, path)
+    MB->>FS: json.dump() → manifest JSON 文件
+    MB->>Logger: info("Manifest 导出完成: {size} KB")
+
+    Op2->>Logger: summary(统计信息)
+    Op2-->>Panel2: {'FINISHED'}
+    Panel2-->>User2: 更新日志面板

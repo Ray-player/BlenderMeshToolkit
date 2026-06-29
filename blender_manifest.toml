@@ -1,0 +1,16 @@
+# Blender Mesh Toolkit - Extension Manifest (Blender 4.2+)
+schema_version = "1.0.0"
+
+id = "mesh_toolkit"
+name = "Mesh Toolkit"
+version = "1.0.0"
+tagline = "Mesh sharing + GLB/Manifest export for UE5"
+maintainer = "Mesh Toolkit Team"
+type = "add-on"
+license = ["GPL-2.0-or-later"]
+
+tags = ["Mesh", "Import-Export", "Pipeline"]
+blender_version_min = "4.2.0"
+# blender_version_max = "5.0.0"
+
+permissions = ["files", "network"]

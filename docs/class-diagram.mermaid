@@ -1,0 +1,191 @@
+classDiagram
+    direction TB
+
+    %% ── 配置 ──
+    class AppConfig {
+        <<singleton>>
+        +float pos_threshold
+        +float rot_threshold
+        +bool force_compensation
+        +str naming_mode
+        +str precision_mode
+        +str target_engine
+        +str export_dir
+        +str anchor_name
+        +bool include_hidden
+        +int max_name_length
+        +get_draco_preset() dict
+        +get_engine_preset() dict
+    }
+
+    %% ── 日志 ──
+    class Logger {
+        <<static>>
+        +log(msg, level) void
+        +info(msg) void
+        +warn(msg) void
+        +error(msg) void
+        +summary(stats) void
+    }
+
+    %% ── 命名 ──
+    class NameSanitizer {
+        <<static>>
+        +sanitize_engine_name(name, engine) str
+        +generate_asset_name(mesh_data_name, mode, max_len) tuple
+        +normalize_mesh_name(name) str
+        +short_mesh_id(name) str
+        -_truncate_smart(text, max_len) str
+        -_strip_invalid_chars(name, engine) str
+    }
+
+    %% ── 坐标 ──
+    class CoordinateConverter {
+        <<static>>
+        +ENGINE_PRESETS dict
+        +convert_location(loc, src, dst) list
+        +convert_rotation(quat, src, dst) list
+        +convert_scale(scale, src, dst) list
+        +convert_matrix(matrix, src, dst) Matrix
+        +register_engine(name, preset) void
+    }
+
+    %% ── 合并结果 ──
+    class MergeResult {
+        +int reassigned
+        +int pos_compensated
+        +int rot_compensated
+        +int skipped
+        +int errors
+        +int orphans_removed
+        +list error_details
+        +to_dict() dict
+    }
+
+    %% ── 网格合并器 ──
+    class MeshMerger {
+        +AppConfig config
+        +merge_selected(force) MergeResult
+        +clean_orphans() int
+        +normalize_all_names() int
+        -_kabsch_index_aligned(master, slave) tuple
+        -_validate_topology(a, b) bool
+        -_compensate_pivot(obj, R, t) void
+        -_recursive_merge(group, master) MergeResult
+        -_find_topology_subset(objects, master) list
+    }
+
+    %% ── 网格资产 ──
+    class MeshAsset {
+        +str mesh_data_name
+        +str short_id
+        +str asset_name
+        +Object reference_obj
+        +int instance_count
+        +Matrix basis_matrix
+        +list material_names
+        +int material_count
+    }
+
+    %% ── 导出上下文 ──
+    class ExportContext {
+        +list mesh_objects
+        +Object anchor_obj
+        +Matrix anchor_matrix
+        +Matrix anchor_inverse
+        +list mesh_assets
+        +dict mesh_assets_by_data
+        +dict bounding_box
+    }
+
+    %% ── 场景扫描器 ──
+    class SceneScanner {
+        +AppConfig config
+        +scan() ExportContext
+        +find_anchor() Object
+        -_group_by_mesh_data(objects) dict
+        -_compute_bounding_box(objects) dict
+        -_build_mesh_assets(groups) list
+    }
+
+    %% ── GLB 导出器 ──
+    class GLBExporter {
+        +AppConfig config
+        +export(context) bool
+        -_create_temp_collection() Collection
+        -_bake_and_place(asset) Object
+        -_cleanup_temp(col, objs, meshes) void
+        -_build_gltf_args() dict
+    }
+
+    %% ── Manifest 构建器 ──
+    class ManifestBuilder {
+        +AppConfig config
+        +build(context) dict
+        +write(manifest, path) void
+        -_build_objects_list(context) list
+        -_build_assets_list(context) list
+        -_build_statistics(context) dict
+        -_serialize_blender_transform(matrix) dict
+        -_serialize_ue5_transform(matrix) dict
+    }
+
+    %% ── UI 面板 ──
+    class MESH_TOOLKIT_PT_MainPanel {
+        +draw(context) void
+    }
+    class MESH_TOOLKIT_PT_MeshMgmt {
+        +draw(context) void
+    }
+    class MESH_TOOLKIT_PT_Export {
+        +draw(context) void
+    }
+    class MESH_TOOLKIT_PT_Log {
+        +draw(context) void
+    }
+
+    %% ── 操作符 ──
+    class MESH_TOOLKIT_OT_ShareMesh {
+        +execute(context) set
+        +force_compensation bool
+    }
+    class MESH_TOOLKIT_OT_CleanOrphans {
+        +execute(context) set
+    }
+    class MESH_TOOLKIT_OT_NormalizeNames {
+        +execute(context) set
+    }
+    class MESH_TOOLKIT_OT_ExportPipeline {
+        +execute(context) set
+    }
+
+    %% ── 关系 ──
+    MeshMerger --> AppConfig : uses
+    MeshMerger --> Logger : uses
+    MeshMerger --> NameSanitizer : uses
+    MeshMerger --> MergeResult : creates
+
+    SceneScanner --> AppConfig : uses
+    SceneScanner --> ExportContext : creates
+    SceneScanner --> MeshAsset : creates
+
+    GLBExporter --> AppConfig : uses
+    GLBExporter --> ExportContext : uses
+    GLBExporter --> Logger : uses
+
+    ManifestBuilder --> AppConfig : uses
+    ManifestBuilder --> ExportContext : uses
+    ManifestBuilder --> CoordinateConverter : uses
+    ManifestBuilder --> NameSanitizer : uses
+
+    MESH_TOOLKIT_OT_ShareMesh --> MeshMerger : invokes
+    MESH_TOOLKIT_OT_CleanOrphans --> MeshMerger : invokes
+    MESH_TOOLKIT_OT_NormalizeNames --> MeshMerger : invokes
+    MESH_TOOLKIT_OT_ExportPipeline --> SceneScanner : invokes
+    MESH_TOOLKIT_OT_ExportPipeline --> GLBExporter : invokes
+    MESH_TOOLKIT_OT_ExportPipeline --> ManifestBuilder : invokes
+
+    MESH_TOOLKIT_PT_MeshMgmt --> MESH_TOOLKIT_OT_ShareMesh : contains
+    MESH_TOOLKIT_PT_MeshMgmt --> MESH_TOOLKIT_OT_CleanOrphans : contains
+    MESH_TOOLKIT_PT_MeshMgmt --> MESH_TOOLKIT_OT_NormalizeNames : contains
+    MESH_TOOLKIT_PT_Export --> MESH_TOOLKIT_OT_ExportPipeline : contains
