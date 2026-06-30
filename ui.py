@@ -5,8 +5,10 @@ Blender Mesh Toolkit 的所有 Panel 和 Operator 注册。
 """
 
 import os
+import json
 import bpy
-from bpy.props import BoolProperty
+from bpy.props import BoolProperty, StringProperty
+from bpy_extras.io_utils import ImportHelper
 
 from .logger import log, info, warn, error, get_log_lines, clear_log
 from .mesh_core import MeshMerger, MeshMergeResult
@@ -289,6 +291,130 @@ class MESHTOOLKIT_OT_ClearLog(bpy.types.Operator):
 
 
 # ═══════════════════════════════════════════
+#  Operator: Share Mesh by JSON
+# ═══════════════════════════════════════════
+
+class MESHTOOLKIT_OT_JsonShareMesh(bpy.types.Operator, ImportHelper):
+    """按外部 JSON 文件指定的分组批量共享网格数据"""
+    bl_idname = "mesh_toolkit.json_share_mesh"
+    bl_label = "按 JSON 数据共享网格"
+    bl_description = "读取 JSON 分组配置，按 source→members 关系批量共享网格数据"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # ImportHelper 自动提供 filepath 属性
+    filename_ext = ".json"
+    filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
+
+    def execute(self, context):
+        """解析 JSON 并逐组执行网格共享。"""
+        filepath = self.filepath
+        if not filepath or not os.path.isfile(filepath):
+            self.report({'ERROR'}, "无效的文件路径")
+            return {'CANCELLED'}
+
+        # 读取 JSON
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            self.report({'ERROR'}, f"JSON 解析失败: {e}")
+            error(f"JSON 解析失败: {e}")
+            return {'CANCELLED'}
+
+        # 验证结构
+        groups = data.get("groups")
+        if not groups or not isinstance(groups, list):
+            self.report({'ERROR'}, "JSON 格式错误: 缺少 'groups' 数组")
+            error("JSON 格式错误: 缺少 'groups' 数组")
+            return {'CANCELLED'}
+
+        # 获取阈值
+        prefs = _get_prefs(context)
+        if prefs is None:
+            pos_thresh = DEFAULT_LOC_THRESHOLD
+            rot_thresh = DEFAULT_ROT_THRESHOLD
+            force = False
+        else:
+            pos_thresh = prefs.pos_threshold
+            rot_thresh = prefs.rot_threshold
+            force = prefs.force_compensation_enabled
+
+        merger = MeshMerger(
+            pos_threshold=pos_thresh,
+            rot_threshold=rot_thresh,
+            force_compensation=force,
+        )
+
+        total_groups = len(groups)
+        ok_groups = 0
+        skip_groups = 0
+        total_reassigned = 0
+
+        info(f"开始按 JSON 分组共享网格: {total_groups} 组")
+
+        for idx, group in enumerate(groups, 1):
+            source_name = group.get("source", "")
+            member_names = group.get("members", [])
+
+            if not source_name or not member_names:
+                warn(f"[组 {idx}/{total_groups}] 跳过: source 或 members 为空")
+                skip_groups += 1
+                continue
+
+            # 查找 source 对象
+            source_obj = bpy.data.objects.get(source_name)
+            if source_obj is None or source_obj.type != 'MESH':
+                warn(f"[组 {idx}/{total_groups}] 跳过: 源对象 '{source_name}' 不存在或非 MESH")
+                skip_groups += 1
+                continue
+
+            # 收集有效的 member 对象
+            member_objs = []
+            for mn in member_names:
+                obj = bpy.data.objects.get(mn)
+                if obj is None or obj.type != 'MESH':
+                    warn(f"[组 {idx}/{total_groups}] 成员 '{mn}' 不存在或非 MESH，已忽略")
+                    continue
+                if obj == source_obj:
+                    warn(f"[组 {idx}/{total_groups}] 成员 '{mn}' 与源对象相同，已忽略")
+                    continue
+                if obj.data == source_obj.data:
+                    info(f"[组 {idx}/{total_groups}] 成员 '{mn}' 已共享源网格，跳过")
+                    continue
+                member_objs.append(obj)
+
+            if not member_objs:
+                info(f"[组 {idx}/{total_groups}] 组 '{source_name}' 无有效成员")
+                skip_groups += 1
+                continue
+
+            # 选中 source + members，执行合并
+            bpy.ops.object.select_all(action='DESELECT')
+            source_obj.select_set(True)
+            for obj in member_objs:
+                obj.select_set(True)
+            context.view_layer.objects.active = source_obj
+
+            result = merger.merge_selected(force=force)
+            total_reassigned += result.reassigned
+            ok_groups += 1
+
+            info(f"[组 {idx}/{total_groups}] '{source_name}' → "
+                 f"重分配{result.reassigned}, 补偿旋转{result.rot_compensated}, "
+                 f"补偿位移{result.pos_compensated}")
+
+        # 汇总
+        summary_msg = (
+            f"JSON 批量共享完成: {ok_groups}/{total_groups} 组成功, "
+            f"重分配 {total_reassigned} 个对象, "
+            f"跳过 {skip_groups} 组"
+        )
+        info(summary_msg)
+        self.report({'INFO'}, summary_msg)
+        return {'FINISHED'}
+
+
+# ═══════════════════════════════════════════
 #  Operator: Create Anchor
 # ═══════════════════════════════════════════
 
@@ -392,6 +518,12 @@ class MESHTOOLKIT_PT_MeshManagement(bpy.types.Panel):
                       text="清理孤立数据",
                       icon='TRASH')
 
+        # JSON 批量共享
+        row = box.row(align=True)
+        row.operator("mesh_toolkit.json_share_mesh",
+                      text="按 JSON 数据共享网格",
+                      icon='FILE_SCRIPT')
+
         # 规范化命名正则输入
         if prefs is not None:
             box.prop(prefs, "normalize_pattern",
@@ -493,6 +625,7 @@ class MESHTOOLKIT_PT_Log(bpy.types.Panel):
 _UI_CLASSES = [
     # Operators
     MESHTOOLKIT_OT_ShareMesh,
+    MESHTOOLKIT_OT_JsonShareMesh,
     MESHTOOLKIT_OT_CleanOrphans,
     MESHTOOLKIT_OT_NormalizeNames,
     MESHTOOLKIT_OT_ExportPipeline,

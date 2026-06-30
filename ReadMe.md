@@ -14,9 +14,11 @@
    - [5.3 规范化命名](#53-规范化命名)
    - [5.4 创建锚点](#54-创建锚点)
    - [5.5 导出 GLB + Manifest](#55-导出-glb--manifest)
+   - [5.6 按 JSON 数据共享网格](#56-按-json-数据共享网格)
 6. [完整工作流：Blender → UE5](#6-完整工作流blender--ue5)
 7. [引擎坐标转换参考](#7-引擎坐标转换参考)
 8. [故障排除](#8-故障排除)
+9. [配套工具：场景分析 Skill](#9-配套工具场景分析-skill)
 
 ---
 
@@ -48,6 +50,8 @@ SimpleBleModlePlugin/
 │   ├── sequence-diagram.mermaid # 时序图
 │   ├── ue5_reconstruct_simple.py # UE5 场景重建脚本
 │   └── ue5_export_actors.py    # UE5 闭环验证导出脚本
+├── skills/
+│   └── blender-scene-analysis/  # 场景分析工具 (生成分组JSON)
 ├── tests/                      # 单元测试
 └── TEST_GUIDE.md               # 测试指南
 ```
@@ -96,6 +100,7 @@ SimpleBleModlePlugin/
 │  ├───────────────────────────────┤  │
 │  │  实用工具                      │  │
 │  │  [    清理孤立数据    ]        │  │
+│  │  [ 按 JSON 数据共享网格 ]      │  │
 │  │  匹配正则  [__[0-9].*$    ]   │  │
 │  │  [    规范化命名      ]        │  │
 │  └───────────────────────────────┘  │
@@ -276,6 +281,64 @@ SimpleBleModlePlugin/
 
 ---
 
+### 5.6 按 JSON 数据共享网格
+
+**用途**：读取外部 JSON 文件指定的分组配置，批量将每组中 `members` 列表的对象共享为 `source` 对象的网格数据。
+
+**操作步骤**：
+
+1. 准备 JSON 配置文件（格式见下方）
+2. 点击 `按 JSON 数据共享网格` 按钮
+3. 在文件浏览器中选择 JSON 文件
+4. 插件自动逐组执行网格共享
+
+**JSON 数据格式**：
+
+```json
+{
+  "version": "1.0",
+  "description": "项目共享网格分组配置",
+  "groups": [
+    {
+      "source": "Wall_Segment_Master",
+      "members": ["Wall_01", "Wall_02", "Wall_03"]
+    },
+    {
+      "source": "Pillar_Reference",
+      "members": ["Pillar_A", "Pillar_B", "Pillar_C"]
+    }
+  ]
+}
+```
+
+**字段说明**：
+
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `version` | string | 否 | 格式版本号 |
+| `description` | string | 否 | 可读说明 |
+| `groups` | array | **是** | 分组列表 |
+| `groups[].source` | string | **是** | 作为共享源的 Blender 对象名，该对象必须是 MESH 类型 |
+| `groups[].members` | string[] | **是** | 需共享 source 网格数据的对象名列表 |
+
+**行为规则**：
+
+| 情况 | 处理 |
+|------|------|
+| source 对象不存在或非 MESH | 跳过该组，日志告警 |
+| member 不存在或非 MESH | 忽略该项，继续处理该组其他成员 |
+| member 与 source 同名 | 忽略 |
+| member 已共享 source 网格 | 跳过（幂等） |
+| 组内无有效 member | 跳过该组 |
+
+**预期结果**：
+
+- 日志面板显示每组处理进度和汇总统计
+- 各组成员共享 source 的 mesh data，Kabsch 算法自动补偿枢轴差异
+- 孤立 mesh data 自动清理
+
+---
+
 ## 6. 完整工作流：Blender → UE5
 
 以下为从 Blender 场景到 UE5 重建的端到端流程：
@@ -404,3 +467,47 @@ Blender 场景
 所有操作均输出到两个通道：
 - **日志面板**：N 面板底部，支持滚动和清空
 - **系统控制台**：`窗口 → 切换系统控制台`（Windows）或终端（macOS/Linux）
+
+---
+
+## 9. 配套工具：场景分析 Skill
+
+`skills/blender-scene-analysis/` 是一个独立的分析工具，用于在批量共享网格之前自动评估场景中哪些对象可以分组共享。
+
+### 功能
+
+- 扫描所有 MESH 对象，按命名前缀自动分组
+- 通过顶点数做初步的几何一致性判断
+- 输出两份 JSON 文件供参考和后续操作
+
+### 输出文件
+
+| 文件 | 说明 |
+|------|------|
+| `Exports/scene_share_groups.json` | 可直接共享的组（≥2 成员，顶点数完全一致），格式兼容「按 JSON 数据共享网格」按钮 |
+| `Exports/scene_share_anomalies.json` | 异常组清单：单例对象 和 同名但顶点数不一致的组 |
+
+### 使用方法
+
+通过 MCP 连接 Blender 后，读取 `skills/blender-scene-analysis/scripts/analyze_scene.py` 内容并在 Blender 中执行。脚本自动使用当前 `.blend` 文件所在目录的 `Exports/` 作为输出路径。
+
+### 异常处理建议
+
+| 异常类型 | 建议 |
+|----------|------|
+| `singleton` | 无需处理，直接保留 |
+| `vertex_mismatch` | 按顶点数二次分组，将一致的子集手动追加到 `scene_share_groups.json` 中即可批量合并 |
+
+### 示例输出
+
+```
+=== 场景网格共享分析 ===
+MESH 对象总数: 9485
+唯一命名前缀: 655
+可共享组: 320 组 (4872 对象)
+   → scene_share_groups.json
+异常组: 1199 组 (5331 对象)
+  单例: 1101 组
+  顶点数不一致: 98 组
+   → scene_share_anomalies.json
+```
